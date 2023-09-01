@@ -1,1 +1,596 @@
+#CNN
 
+from __future__ import print_function
+import numpy as np
+import matplotlib.pyplot as plt
+import copy
+import tensorflow as tf
+from tensorflow import keras
+from keras.models import Sequential, Model
+from keras.layers import Dense, Activation
+from keras.layers import Conv2D
+from keras.layers import Reshape, Input
+from keras.layers import Conv3D, Add
+from keras.layers import GlobalAveragePooling2D, Multiply
+#Kerasはtensorflow2.0の中に統合されたので、コマンドを修正
+from tensorflow.keras.layers import BatchNormalization
+from tensorflow.keras.optimizers import SGD,Adam
+from tensorflow.keras import utils as np_utils
+from tensorflow.keras.utils import Sequence
+#from tensorflow.python.keras.utils.multi_gpu_utils import multi_gpu_model
+import tensorflow.keras.backend
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+
+import sys
+sys.path.append('/content/drive/MyDrive/Colab Notebooks/Plasama_Search/Deeplearning/石川さん_module')
+import read_nld_data
+
+データの情報
+
+NE_1~401.dat
+
+phi_1~401.dat
+
+class SimDataset3DT():
+
+    def __init__(self, dir_x,dir_y):
+        nframe = 3 #time方向のsize(t-dt,t,t+dt)
+        npatch = 398 #きりが良いから(最後のpatchが、t-dt=398,t=399,t+dt=400)
+
+        self.ndt = nframe## the number of consecutive frames included in each data set
+        self.d = read_nld_data.Sim_data3DT_jump_z128(nframe=nframe,npatch=npatch,den_tf=1,phi_tf=1)
+        self.d.readout(dir_x,dir_y)## readout the data
+        self.Nrow = 86## row size of an image
+        self.Ncol = 64## column size of an image
+        self.image_shape = (self.Nrow, self.Ncol, self.ndt, 1)## shape of each data set
+        ## (Nrow, Ncol, Nf, s)
+        ## Nrow, Ncol: size of an image(空間軸)
+        ## Nf: the number of frames(時間軸)
+        ## s: the number of physical quantities to input
+
+        ## initialize
+        self.X_train_shape = (0,0,0,0,0)
+        self.y_train_shape = (0,0,0,0,0)
+        self.X_vali_shape = (0,0,0,0,0)
+        self.y_vali_shape = (0,0,0,0,0)
+        self.X_test_shape = (0,0,0,0,0)
+        self.y_test_shape = (0,0,0,0,0)
+
+
+    def get_batch(self):
+        ## X : プラズマ密度
+        ## y : 静電ポテンシャル
+        Nrow = self.Nrow
+        Ncol = self.Ncol
+        s_train = 0
+        e_train = 280
+        n_train = e_train - s_train
+        s_vali = 358
+        e_vali = 398
+        n_vali = e_vali - s_vali
+        s_test = 290
+        e_test = 330
+        n_test = e_test - s_test
+
+        ## X: input data, Y: answer (output)
+        ## train: training data
+        ## vali: validation
+        ## test: test of the model
+        X0_train = np.reshape(self.d.den[s_train:e_train,0:Nrow,0:Ncol,:], (n_train,Nrow,Ncol,self.ndt,1))
+        X0_vali  = np.reshape(self.d.den[s_vali:e_vali,  0:Nrow,0:Ncol,:],  (n_vali,Nrow,Ncol,self.ndt,1))
+        X0_test  = np.reshape(self.d.den[s_test:e_test,  0:Nrow,0:Ncol,:],  (n_test,Nrow,Ncol,self.ndt,1))
+        y0_train   = np.reshape(self.d.phi[s_train:e_train,0:Nrow,0:Ncol,0], (n_train,Nrow,Ncol,1))
+        y0_vali    = np.reshape(self.d.phi[s_vali:e_vali,  0:Nrow,0:Ncol,0],  (n_vali,Nrow,Ncol,1))
+        y0_test    = np.reshape(self.d.phi[s_test:e_test,  0:Nrow,0:Ncol,0],  (n_test,Nrow,Ncol,1))
+
+        ## normalization: std=1, mean=0
+        X0_train = (X0_train - np.mean(X0_train))/np.std(X0_train)
+        X0_vali = (X0_vali - np.mean(X0_vali))/np.std(X0_vali)
+        X0_test = (X0_test - np.mean(X0_test))/np.std(X0_test)
+
+        y_train = (y0_train-np.mean(y0_train))/np.std(y0_train)
+        y_vali = (y0_vali-np.mean(y0_vali))/np.std(y0_vali)
+        y_test = (y0_test-np.mean(y0_test))/np.std(y0_test)
+
+        s = self.image_shape[-1]## default: s=2
+        ## if you change s, you have to modify the model definition below
+        if s==2:
+          pass
+            ## input both the Temprature and vertical velocity
+            # X_train = np.c_[X0_train,X1_train]
+            # X_vali = np.c_[X0_vali,X1_vali]
+            # X_test = np.c_[X0_test,X1_test]
+        elif s==1:
+            ## input only the vertical velocity
+            X0_train = np.reshape(X0_train, (n_train, Nrow, Ncol, self.ndt))
+            X0_vali  = np.reshape(X0_vali, (n_vali, Nrow, Ncol, self.ndt))
+            X0_test  = np.reshape(X0_test, (n_test, Nrow, Ncol, self.ndt))
+            X_train = X0_train
+            X_vali = X0_vali
+            X_test = X0_test
+        else:
+            return None
+
+        self.X_train_shape = np.shape(X_train)
+        self.X_vali_shape = np.shape(X_vali)
+        self.X_test_shape = np.shape(X_test)
+        self.y_train_shape = np.shape(y_train)
+        self.y_vali_shape = np.shape(y_vali)
+        self.y_test_shape =np.shape(y_test)
+
+        return X_train, y_train, X_test, y_test, X_vali, y_vali
+
+def write_memmap(X_train, y_train, X_test, y_test, X_vali, y_vali, dataset):
+    X_train_memmap = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/X_train_memmap.dat',dtype=np.float32,
+                               mode='w+',shape=dataset.X_train_shape)
+    X_train_memmap[:] = X_train
+    X_vali_memmap = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/X_vali_memmap.dat',dtype=np.float32,
+                              mode='w+',shape=dataset.X_vali_shape)
+    X_vali_memmap[:] = X_vali
+    X_test_memmap = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/X_test_memmap.dat',dtype=np.float32,
+                              mode='w+',shape=dataset.X_test_shape)
+    X_test_memmap[:] = X_test
+    y_train_memmap = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/y_train_memmap.dat',dtype=np.float32,
+                               mode='w+',shape=dataset.y_train_shape)
+    y_train_memmap[:] = y_train
+    y_vali_memmap = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/y_vali_memmap.dat',dtype=np.float32,
+                              mode='w+',shape=dataset.y_vali_shape)
+    y_vali_memmap[:] = y_vali
+    y_test_memmap = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/y_test_memmap.dat',dtype=np.float32,
+                              mode='w+',shape=dataset.y_test_shape)
+    y_test_memmap[:] = y_test
+    del X_train_memmap,X_vali_memmap,X_test_memmap
+    del y_train_memmap,y_vali_memmap,y_test_memmap
+
+
+import math
+class DataSequence(Sequence):
+    def __init__(self,batch_size,X_shape,y_shape):
+        self.batch_size = batch_size #1epoch当たりに使用するデータの数(任意)
+        self.X_data = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/X_train_memmap.dat', dtype=np.float32, mode='r',
+                                shape=X_shape)
+        self.y_data = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/y_train_memmap.dat', dtype=np.float32, mode='r',
+                                shape=y_shape)
+        self.nsample = X_shape[0] #=280  trainデータの総epoch数
+        self.num_batches_per_epoch = math.ceil(self.nsample/self.batch_size) #nsample/batch_size
+
+    def __getitem__(self, batch_num):#必須
+        start_index = batch_num * self.batch_size
+        end_index = min((batch_num + 1) * self.batch_size, self.nsample)
+        X = self.X_data[start_index: end_index]
+        y = self.y_data[start_index: end_index]
+        return X, y
+
+    def __len__(self):#必須
+        return self.num_batches_per_epoch
+
+    def on_epoch_end(self):
+        pass
+
+class DataSequence_vali(Sequence):
+    def __init__(self,batch_size,X_shape,y_shape):
+        self.batch_size = batch_size
+        self.X_data = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/X_vali_memmap.dat', dtype=np.float32, mode='r',
+                                shape=X_shape)
+        self.y_data = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/y_vali_memmap.dat', dtype=np.float32, mode='r',
+                                shape=y_shape)
+        self.nsample = X_shape[0]
+        self.num_batches_per_epoch = math.ceil(self.nsample/self.batch_size)
+
+
+    def __getitem__(self, batch_num):
+        start_index = batch_num * self.batch_size
+        end_index = min((batch_num + 1) * self.batch_size, self.nsample)
+        X = self.X_data[start_index: end_index]
+        y = self.y_data[start_index: end_index]
+        return X, y
+
+    def __len__(self):
+        return self.num_batches_per_epoch
+
+    def on_epoch_end(self):
+        pass
+
+class DataSequence_test(Sequence):
+    def __init__(self,batch_size,X_shape,y_shape):
+        self.batch_size = batch_size
+        self.X_data = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/X_test_memmap.dat', dtype=np.float32, mode='r',
+                                shape=X_shape)
+        self.y_data = np.memmap(filename='/content/drive/MyDrive/NLD_data_memmap/y_test_memmap.dat', dtype=np.float32, mode='r',
+                                shape=y_shape)
+        self.nsample = X_shape[0]
+        self.num_batches_per_epoch = math.ceil(self.nsample/self.batch_size)
+
+    def __getitem__(self, batch_num):
+        start_index = batch_num * self.batch_size
+        end_index = min((batch_num + 1) * self.batch_size, self.nsample)
+        X = self.X_data[start_index: end_index]
+        y = self.y_data[start_index: end_index]
+        return X#, y
+
+    def get_y(self, batch_num):
+        start_index = batch_num * self.batch_size
+        end_index = min((batch_num + 1) * self.batch_size, self.nsample)
+        y = self.y_data[start_index: end_index]
+        return y
+
+
+    def __len__(self):
+        return self.num_batches_per_epoch
+
+    def on_epoch_end(self):
+        pass
+
+data_readout = False#True
+#data_readout = True
+
+if data_readout:
+    ## read the dataset and create MEMMAP files
+    dir_x = "/content/drive/Shareddrives/PANTA_data/NLD_data/2D_SN1089/NE_{}.dat"
+    dir_y  ="/content/drive/Shareddrives/PANTA_data/NLD_data/2D_SN1089/phi_{}.dat"
+    dataset = SimDataset3DT(dir_x,dir_y)
+    X_train, y_train, X_test, y_test, X_vali, y_vali= dataset.get_batch()
+    write_memmap(X_train, y_train, X_test, y_test, X_vali, y_vali, dataset)
+
+    image_input_shape = dataset.image_shape
+    X_train_shape = dataset.X_train_shape
+    y_train_shape = dataset.y_train_shape
+    X_vali_shape = dataset.X_vali_shape
+    y_vali_shape = dataset.y_vali_shape
+    X_test_shape = dataset.X_test_shape
+    y_test_shape = dataset.y_test_shape
+
+else:
+  image_input_shape = (86, 64, 3, 1)
+  X_train_shape = (280,86,64,3,1)
+  y_train_shape = (280,86,64,1)
+  X_vali_shape = (40,86,64,3,1)
+  y_vali_shape = (40,86,64,1)
+  X_test_shape = (40,86,64,3,1)
+  y_test_shape = (40,86,64,1)
+  Nrow = 86 #行
+  Ncol = 64  #列
+  Nsample_test = y_test_shape[0]
+
+
+
+# Model Definition
+
+ndt = image_input_shape[-2] #t-dt,t,t+dt
+model0 = 0
+
+
+Nf1 = 60
+Nc1 = 3
+Nf2 = 40
+Nc2 = 7
+Nf3 = 20
+Nc3 = 15
+Nf4 = 10
+Nc4 = 31
+Nf5 = 5
+Nc5 = 51
+
+
+inputs = Input(shape=image_input_shape)  #(86,64,3,1)
+###############################################################first layer
+x1 = Conv3D(Nf1, (Nc1,Nc1,ndt), padding='same',kernel_initializer='he_normal')(inputs)
+x1 = BatchNormalization()(x1)
+x12 = Conv3D(Nf2, (Nc2,Nc2,ndt), padding='same',kernel_initializer='he_normal')(inputs)
+x12 = BatchNormalization()(x12)
+x13 = Conv3D(Nf3, (Nc3,Nc3,ndt), padding='same',kernel_initializer='he_normal')(inputs)
+x13 = BatchNormalization()(x13)
+x14 = Conv3D(Nf4, (Nc4,Nc4,ndt), padding='same',kernel_initializer='he_normal')(inputs)
+x14 = BatchNormalization()(x14)
+x15 = Conv3D(Nf5, (Nc5,Nc5,ndt), padding='same',kernel_initializer='he_normal')(inputs)
+x15 = BatchNormalization()(x15)
+x1 = BatchNormalization()(x1)
+x1 = Activation('relu')(x1)
+x12 = BatchNormalization()(x12)
+x12 = Activation('relu')(x12)
+x13 = BatchNormalization()(x13)
+x13 = Activation('relu')(x13)
+x14 = BatchNormalization()(x14)
+x14 = Activation('relu')(x14)
+x15 = BatchNormalization()(x15)
+x15 = Activation('relu')(x15)
+x3 = keras.layers.concatenate([inputs,x1,x12,x13,x14,x15],axis=-1)
+x0 = Reshape((Nrow,Ncol,-1))(x3)
+print(x0.shape)
+## SE block
+xse = GlobalAveragePooling2D()(x0)
+xse = Dense(30, activation='relu')(xse)#272
+xse = Dense(408, activation='sigmoid')(xse)## もともとは411 depends on several parameters (Nf1-5, s, ndt,...)
+print("x0=",x0.shape)
+print("xse=",xse.shape)
+x0 = Multiply()([x0,xse])## this inner product should be well defined
+###############################################################second layer
+## bottle-neck layers
+x71 = Conv2D(20, (1,1), padding='same',kernel_initializer='he_normal')(x0)#60
+x71 = BatchNormalization()(x71)
+x72 = Conv2D(10, (1,1), padding='same',kernel_initializer='he_normal')(x0)#40
+x72 = BatchNormalization()(x72)
+x73 = Conv2D(5, (1,1), padding='same',kernel_initializer='he_normal')(x0)
+x73 = BatchNormalization()(x73)
+x74 = Conv2D(5, (1,1), padding='same',kernel_initializer='he_normal')(x0)
+x74 = BatchNormalization()(x74)
+x75 = Conv2D(2, (1,1), padding='same',kernel_initializer='he_normal')(x0)
+x75 = BatchNormalization()(x75)
+## Conv
+x1 = Conv2D(Nf1, (Nc1,Nc1), padding='same',kernel_initializer='he_normal')(x71)
+x12 = Conv2D(Nf2, (Nc2,Nc2), padding='same',kernel_initializer='he_normal')(x72)
+x13 = Conv2D(Nf3, (Nc3,Nc3), padding='same',kernel_initializer='he_normal')(x73)
+x14 = Conv2D(Nf4, (Nc4,Nc4), padding='same',kernel_initializer='he_normal')(x74)
+x15 = Conv2D(Nf5, (Nc5,Nc5), padding='same',kernel_initializer='he_normal')(x75)
+x1 = BatchNormalization()(x1)
+x1 = Activation('relu')(x1)
+x12 = BatchNormalization()(x12)
+x12 = Activation('relu')(x12)
+x13 = BatchNormalization()(x13)
+x13 = Activation('relu')(x13)
+x14 = BatchNormalization()(x14)
+x14 = Activation('relu')(x14)
+x15 = BatchNormalization()(x15)
+x15 = Activation('relu')(x15)
+x0 = keras.layers.concatenate([x0,x1,x12,x13,x14,x15],axis=-1)
+###################################################################
+main_output = Conv2D(1,(1,1), activation='linear',kernel_initializer='he_normal')(x0)
+model0 = Model(inputs=inputs,outputs=main_output)
+
+print(model0.summary())
+
+model0.compile(loss='mean_squared_error',optimizer=Adam(),metrics=['mse'])
+
+datasequence = DataSequence(10, X_train_shape, y_train_shape)
+datasequence_vali = DataSequence_vali(25, X_vali_shape, y_vali_shape)
+
+history = model0.fit_generator(generator=datasequence, epochs=20,validation_data=datasequence_vali) #default=20
+
+def plot_history(history):
+    #plt.plot(np.log10(history.history['loss']),"o-",label="loss")
+    #plt.plot(np.log10(history.history['val_loss']),"o-",label="val_loss")
+    plt.plot(history.history['loss'],"o-",label="loss")
+    plt.plot(history.history['val_loss'],"o-",label="val_loss")
+    plt.title('model loss')
+    plt.xlabel('epoch')
+    plt.ylabel('loss')
+    plt.legend(loc="upper right")
+    plt.show()
+
+
+plot_history(history)
+
+#history data保存
+# import pandas as pd
+# num = int(input())
+# hist_df =  pd.DataFrame(history.history)
+# hist_df.to_csv("/content/drive/MyDrive/Colab Notebooks/Plasama_Search/スペクトル解析用のCNNデータ/7月18日/history_epoch30{}.csv".format(num))
+
+#predict画像生成
+datasequence_test = DataSequence_test(1, X_test_shape, y_test_shape)
+predict0 = model0.predict_generator(datasequence_test)
+
+#answer画像生成
+s = y_test_shape
+Nx = s[1]
+Ny = s[2]
+y_test = np.zeros((Nsample_test,Nx,Ny,1)) #Nsample:testデータのbatchsize
+for i in range(Nsample_test):
+    y_test[i,:,:,:] = datasequence_test.get_y(i)
+
+pre_data = predict0[:,:,:,0]
+ans_data = y_test[:,:,:,0]
+
+#3次元配列データ保存
+num = int(input())
+dir_pre="/content/drive/MyDrive/Colab Notebooks/Plasama_Search/スペクトル解析用のCNNデータ/7月19日/pre_data_3d_ks_{}*{}.npy".format(num,num)
+dir_ans="/content/drive/MyDrive/Colab Notebooks/Plasama_Search/スペクトル解析用のCNNデータ/7月19日/ans_data_3d_ks_{}*{}.npy".format(num,num)
+np.save(dir_pre,pre_data)
+np.save(dir_ans,ans_data)
+
+#スペクトル解析
+
+#時間分布用
+#predict画像生成
+datasequence_test = DataSequence_test(1, X_test_shape, y_test_shape)
+predict0 = model0.predict_generator(datasequence_test)
+print(np.shape(predict0))
+r_fix = 50
+pre_data = predict0[:,r_fix,:,0]
+
+#answer画像生成
+s = y_test_shape
+Nx = s[1]
+Ny = s[2]
+y_test = np.zeros((Nsample_test,Nx,Ny,1)) #Nsample:testデータのbatchsize
+for i in range(Nsample_test):
+    y_test[i,:,:,:] = datasequence_test.get_y(i)
+ans_data = y_test[:,r_fix,:,0]
+
+#predict画像とanswer画像の差分を生成
+err = pre_data-ans_data
+
+plt.figure(figsize=(10,15))
+plt.subplot(131)
+plt.imshow(pre_data)
+plt.title("predict")
+plt.subplot(132)
+plt.imshow(ans_data)
+plt.title("answer")
+plt.subplot(133)
+#plt.imshow(np.abs(err),origin='lower',cmap='gist_heat',vmin=0,vmax=2)
+plt.imshow(np.abs(err),origin='lower',cmap='gist_heat')
+plt.title("|phi(predict)-phi(answer)|")
+
+## correlation coefficient
+Nytest = 1*s[1]*s[2]
+cc = np.corrcoef(predict0.reshape(Nytest*Nsample_test),y_test.reshape(Nytest*Nsample_test)) #一次元配列に変換している
+plt.scatter(predict0, y_test, s=2)
+plt.xlabel('predicted Phi')
+plt.ylabel('answer phi')
+plt.title('Average cc='+str(cc[0,1]))
+plt.xlim(-4,4)
+plt.ylim(-4,4)
+plt.show()
+print(cc)
+
+dir_pre="/content/drive/MyDrive/Colab Notebooks/Plasama_Search/スペクトル解析用のCNNデータ/7月11日/pre_data_r=50_ks_full.npy"
+dir_ans="/content/drive/MyDrive/Colab Notebooks/Plasama_Search/スペクトル解析用のCNNデータ/7月11日/ans_data_r=50_ks_full.npy"
+np.save(dir_pre,pre_data)
+np.save(dir_ans,ans_data)
+
+#空間構造用
+
+#空間分布用
+#predict画像生成
+datasequence_test = DataSequence_test(1, X_test_shape, y_test_shape)
+predict0 = model0.predict_generator(datasequence_test)
+print(np.shape(predict0))
+t_fix = 5
+pre_data = predict0[t_fix,:,:,0]
+
+#answer画像生成
+s = y_test_shape
+Nx = s[1]
+Ny = s[2]
+y_test = np.zeros((Nsample_test,Nx,Ny,1)) #Nsample:testデータのbatchsize
+for i in range(Nsample_test):
+    y_test[i,:,:,:] = datasequence_test.get_y(i)
+ans_data = y_test[t_fix,:,:,0]
+
+#predict画像とanswer画像の差分を生成
+err = pre_data-ans_data
+
+plt.figure(figsize=(10,15))
+plt.subplot(131)
+plt.imshow(pre_data)
+plt.title("predict")
+plt.subplot(132)
+plt.imshow(ans_data)
+plt.title("answer")
+plt.subplot(133)
+plt.imshow(np.abs(err),origin='lower',cmap='gist_heat',vmin=0,vmax=2)
+plt.title("|phi(predict)-phi(answer)|")
+
+## correlation coefficient
+Nytest = 1*s[1]*s[2]
+cc = np.corrcoef(predict0.reshape(Nytest*Nsample_test),y_test.reshape(Nytest*Nsample_test)) #一次元配列に変換している
+plt.scatter(predict0, y_test, s=2)
+plt.xlabel('predicted phi')
+plt.ylabel('answer phi')
+plt.title('Average cc='+str(cc[0,1]))
+plt.xlim(-4,3)
+plt.ylim(-3,3)
+plt.show()
+print(cc)
+
+#スペクトル解析
+
+dir_pre='/content/drive/MyDrive/Colab Notebooks/Plasama_Search/スペクトル解析用のCNNデータ/pre_data_t=5_ks=51*51_7_5.npy'
+dir_ans="/content/drive/MyDrive/Colab Notebooks/Plasama_Search/スペクトル解析用のCNNデータ/ans_data_t=5_ks=51*51_7_5.npy"
+np.save(dir_pre,pre_data)
+np.save(dir_ans,ans_data)
+
+load_pre_data = np.load(dir_pre)
+load_ans_data = np.load(dir_ans)
+
+ans_data = np.transpose(ans_data)
+pre_data = np.transpose(pre_data)
+#半径方向：0～1で86点計測
+#周方向：0～360°で64点計測
+
+ans_data = np.transpose(load_ans_data)
+pre_data = np.transpose(load_pre_data)
+#半径方向：0～1で86点計測
+#周方向：0～360°で64点計測
+
+#軸の生成
+N_theta,N_r = ans_data.shape   #N_theta:周方向のpixel数、N_r:半径方向のpixel数
+radius = np.linspace(1/N_r,1,N_r) #半径方向を軸
+theta = np.linspace(0,2*np.pi-(2*np.pi/N_theta),N_theta) #周方向の軸
+
+
+#半径方向の波数軸
+dr = radius[1] - radius[0]
+kr = 2*np.pi*np.fft.fftfreq(N_r,d=dr)
+
+radius_index = np.arange(10,81,10)
+plt.figure(figsize=(20,30))
+plot_count=1
+
+for fix_rii in range(len(radius_index)):
+  #周方向の波数軸を生成
+  #fix_ri = 40  #半径方向を固定する
+  fix_ri = radius_index[fix_rii]  #半径方向を固定する
+  fix_r = radius[fix_ri]
+  theta_dis = fix_r * theta #周方向距離(S=rθ) #theta distance
+  dtheta = theta_dis[1] - theta_dis[0] #周方向距離の間隔
+  #波数(周方向)
+  ktheta = 2*np.pi*np.fft.fftfreq(N_theta,d=dtheta)
+
+  #半径方向をfix_rで固定した周方向のデータ
+  pre_data_r_fix = pre_data[:,fix_ri]
+  ans_data_r_fix = ans_data[:,fix_ri]
+
+  #predict PSD
+  pre_fhat = np.fft.fft(pre_data_r_fix,N_theta)     #compute the FFT
+  pre_PSD = np.abs(pre_fhat)**2 / N_theta  #Power spetctrum 共役な複素数をかけている
+  #answer PSD
+  ans_fhat = np.fft.fft(ans_data_r_fix,N_theta)     #compute the FFT
+  ans_PSD = np.abs(ans_fhat)**2  / N_theta  #Power spetctrum 共役な複素数をかけている
+
+
+  #x:theta - y:phiグラフ
+  plt.subplot(8, 2, plot_count)
+  plt.plot(theta,pre_data_r_fix,label="pre")
+  plt.plot(theta,ans_data_r_fix,label="ans")
+  plt.legend()
+  plt.xlabel("theta")
+  plt.ylabel("phi")
+  plt.title("r_index={}".format(fix_ri))
+  plot_count+=1
+
+  #x:ktheta - y:PSDグラフ
+  plt.subplot(8, 2, plot_count)
+  plt.plot(ktheta[:int(N_theta/2)],np.log10(pre_PSD)[:int(N_theta/2)],label="pre")
+  plt.plot(ktheta[:int(N_theta/2)],np.log10(ans_PSD)[:int(N_theta/2)],label="ans")
+  plt.legend()
+  plt.xlabel("wave number")
+  plt.ylabel("Power spectrum density")
+  plt.title("wavenumber of circumferential(r_index={})".format(fix_ri))
+  plot_count+=1
+
+#シンポジウム用コード
+s_ans_data = np.transpose(ans_data)
+s_pre_data = np.transpose(pre_data)
+
+#軸の生成
+N_theta,N_r = s_ans_data.shape   #N_theta:周方向のpixel数、N_r:半径方向のpixel数
+radius = np.linspace(1/N_r,1,N_r) #半径方向を軸
+theta = np.linspace(0,2*np.pi-(2*np.pi/N_theta),N_theta) #周方向の軸
+
+#周方向の波数軸を生成
+fix_ri = 50  #半径方向を固定する
+fix_r = radius[fix_ri]
+theta_dis = fix_r * theta #周方向距離(S=rθ) #theta distance
+dtheta = theta_dis[1] - theta_dis[0] #周方向距離の間隔
+#波数(周方向)
+ktheta = 2*np.pi*np.fft.fftfreq(N_theta,d=dtheta)
+
+#半径方向をfix_rで固定した周方向のデータ
+pre_data_r_fix = s_pre_data[:,fix_ri]
+ans_data_r_fix = s_ans_data[:,fix_ri]
+
+#predict PSD
+pre_fhat = np.fft.fft(pre_data_r_fix,N_theta)     #compute the FFT
+pre_PSD = np.abs(pre_fhat)**2 / N_theta  #Power spetctrum 共役な複素数をかけている
+#answer PSD
+ans_fhat = np.fft.fft(ans_data_r_fix,N_theta)     #compute the FFT
+ans_PSD = np.abs(ans_fhat)**2  / N_theta  #Power spetctrum 共役な複素数をかけている
+
+#グラフ描画
+plt.plot(ktheta[:int(N_theta/2)],np.log10(pre_PSD)[:int(N_theta/2)],label="pre")
+plt.plot(ktheta[:int(N_theta/2)],np.log10(ans_PSD)[:int(N_theta/2)],label="ans")
+plt.legend()
+plt.xlabel("wave number")
+plt.ylabel("Power spectrum density")
